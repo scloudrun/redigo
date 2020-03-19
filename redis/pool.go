@@ -185,11 +185,19 @@ func NewPool(newFn func() (Conn, error), maxIdle int) *Pool {
 // getting an underlying connection, then the connection Err, Do, Send, Flush
 // and Receive methods return that error.
 func (p *Pool) Get() Conn {
-	pc, err := p.get(nil)
+	pc, _, err := p.get(nil)
 	if err != nil {
 		return errorConn{err}
 	}
 	return &activeConn{p: p, pc: pc}
+}
+
+func (p *Pool) Get2() (Conn, *Conn) {
+	pc, c, err := p.get(nil)
+	if err != nil {
+		return errorConn{err}, nil
+	}
+	return &activeConn{p: p, pc: pc}, c
 }
 
 // GetContext gets a connection using the provided context.
@@ -201,7 +209,7 @@ func (p *Pool) Get() Conn {
 // If the function completes without error, then the application must close the
 // returned connection.
 func (p *Pool) GetContext(ctx context.Context) (Conn, error) {
-	pc, err := p.get(ctx)
+	pc, _, err := p.get(ctx)
 	if err != nil {
 		return errorConn{err}, err
 	}
@@ -301,7 +309,7 @@ func (p *Pool) lazyInit() {
 
 // get prunes stale connections and returns a connection from the idle list or
 // creates a new connection.
-func (p *Pool) get(ctx context.Context) (*poolConn, error) {
+func (p *Pool) get(ctx context.Context) (*poolConn, *Conn, error) {
 
 	// Handle limit for p.Wait == true.
 	var waited time.Duration
@@ -321,7 +329,7 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 			select {
 			case <-p.ch:
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, nil, ctx.Err()
 			}
 		}
 		if wait {
@@ -356,7 +364,7 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 		p.mu.Unlock()
 		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&
 			(p.MaxConnLifetime == 0 || nowFunc().Sub(pc.created) < p.MaxConnLifetime) {
-			return pc, nil
+			return pc, &pc.c, nil
 		}
 		pc.c.Close()
 		p.mu.Lock()
@@ -366,17 +374,18 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 	// Check for pool closed before dialing a new connection.
 	if p.closed {
 		p.mu.Unlock()
-		return nil, errors.New("redigo: get on closed pool")
+		return nil, nil, errors.New("redigo: get on closed pool")
 	}
 
 	// Handle limit for p.Wait == false.
 	if !p.Wait && p.MaxActive > 0 && p.active >= p.MaxActive {
 		p.mu.Unlock()
-		return nil, ErrPoolExhausted
+		return nil, nil, ErrPoolExhausted
 	}
 
 	p.active++
 	p.mu.Unlock()
+
 	c, err := p.dial(ctx)
 	if err != nil {
 		c = nil
@@ -387,7 +396,7 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 		}
 		p.mu.Unlock()
 	}
-	return &poolConn{c: c, created: nowFunc()}, err
+	return &poolConn{c: c, created: nowFunc()}, &c, err
 }
 
 func (p *Pool) dial(ctx context.Context) (Conn, error) {
